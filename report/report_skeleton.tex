@@ -1,0 +1,364 @@
+% IE 643 project report -- SKELETON in the course template.
+% Tables, equations, algorithm and figure placements are filled in.
+% Every \note{...} (red) marks text YOU must write in your own words (course rule: no AI-generated prose).
+% Delete the \note boxes before submitting.
+\documentclass[twoside,english]{article}
+\setlength{\oddsidemargin}{0.25 in}
+\setlength{\evensidemargin}{-0.25 in}
+\setlength{\topmargin}{-0.6 in}
+\setlength{\textwidth}{6.5 in}
+\setlength{\textheight}{8.5 in}
+\setlength{\headsep}{0.75 in}
+\setlength{\parindent}{0 in}
+\setlength{\parskip}{0.1 in}
+
+\usepackage{amsmath,amsfonts,graphicx,algorithm,caption}
+\usepackage[noend]{algpseudocode}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+\usepackage[document]{ragged2e}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage{booktabs}
+
+\newcounter{lecnum}
+\renewcommand{\thepage}{\arabic{page}}
+\renewcommand{\thesection}{\arabic{section}}
+\renewcommand{\theequation}{\arabic{equation}}
+\renewcommand{\thefigure}{\arabic{figure}}
+\renewcommand{\thetable}{\arabic{table}}
+\makeatletter
+\def\BState{\State\hskip-\ALG@thistlm}
+\makeatother
+\newcommand{\lecture}[3]{
+   \pagestyle{myheadings}
+   \thispagestyle{plain}
+   \newpage
+   \setcounter{page}{1}
+   \noindent
+   \begin{center}
+   \framebox{
+      \vbox{\vspace{2mm}
+    \hbox to 6.28in { {\bf IE 643: Deep Learning - Theory and Practice \hfill July-Dec 2026} }
+       \vspace{4mm}
+       \hbox to 6.28in { {\Large \hfill Project Report: #1  \hfill} }
+       \vspace{4mm}
+       \hbox to 6.28in { {\it Team Name: #2 \hfill Team Members: #3} }
+      \vspace{2mm}}
+   }
+   \end{center}
+   \vspace*{4mm}
+}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\note}[1]{\par\noindent\fcolorbox{red}{red!5}{\parbox{0.97\linewidth}{\color{red!70!black}\small\textbf{Write here (own words):} #1}}\par}
+% include a figure if the file exists, otherwise show a placeholder box (so the file always compiles)
+\newcommand{\fig}[2]{\IfFileExists{#1}{\includegraphics[width=#2\linewidth]{#1}}{\fbox{\parbox{#2\linewidth}{\centering\vspace{1cm}missing: \texttt{\detokenize{#1}}\vspace{1cm}}}}}
+
+\begin{document}
+\lecture{Birth-Death Accelerated Sampling for Score-Based Diffusion Models}{TEAM NAME}{NAME (ROLL NO.), NAME (ROLL NO.)}
+
+\begin{abstract}
+\note{4--6 sentences: the task (fewer diffusion sampling steps with birth-death), what goes wrong with few steps,
+your approach (birth-death after every noise level, density ratio estimated from the model), and the key numbers:
+e.g.\ on imbalanced MNIST, birth-death with half the steps ($T{=}50$) gives a better digit mix than the $T{=}100$
+baseline (TV 0.062 vs 0.095) at similar FID (45.6 vs 49.7); at $T{=}20$ it halves the digit-mix error (0.091 vs 0.219);
+the label-free kNN estimator lowers FID from 49.7 to 30.1 at equal cost; on the 2D toy problem $T{=}5$ with birth-death beats $T{=}100$ without it.}
+\end{abstract}
+
+\section{Introduction}
+\note{Why diffusion sampling is slow (hundreds--thousands of network evaluations); why fewer steps fail (particles do
+not mix between modes; wrong mode proportions); the idea of birth-death (move mass by removing/duplicating particles
+instead of transporting it); why deep learning is needed (score network, classifier, denoiser). Last paragraph: the
+structure of the report (Sections 2--9).}
+
+\section{Project Workflow}
+\note{Bullet points in the order you actually worked. Suggested list:
+(1) literature (NCSN, DDPM, DDIM, Lu et al.); (2) 2D toy: baseline annealed Langevin and step sweep;
+(3) toy: birth-death with exact potential; (4) toy: three estimators of $V$ (energy network, heat-equation loss, ODE
+likelihood) and GPU timing; (5) MNIST: imbalanced data, noise-aware classifier, score network; (6) MNIST: baseline
+sweep, classifier and kNN birth-death; (7) ablations (step schedule, $k$, rate, $V$+KDE); (8) normal MNIST control;
+(9) interface and packaging. A workflow diagram (boxes and arrows) is recommended.}
+
+\section{Literature Survey} \label{sec:litsurvey}
+\note{2--3 paragraphs per paper, in your words: Song \& Ermon \citep{song2019} (noise-conditional score network,
+denoising score matching, annealed Langevin, low-density regions); Song \& Ermon \citep{song2020} (noise schedule,
+$s(x,\sigma)=s(x)/\sigma$, EMA); Ho et al.\ \citep{ho2020} (DDPM, U-Net with time embedding); Song et al.\
+\citep{ddim} (DDIM: fewer steps with a deterministic sampler -- the standard acceleration approach, different from
+ours); Lu, Lu \& Nolen \citep{lu2019} (birth-death Langevin, rate $\beta$, Algorithm 1, convergence independent of
+the energy barrier); Song et al.\ \citep{song2021} (probability-flow ODE likelihood).}
+
+\section{Proposed Approach} \label{sec:our_proj}
+
+\subsection{Background: score-based sampling}
+For $p_\sigma = p_{\text{data}} * \mathcal N(0,\sigma^2 I)$ with $L{=}10$ geometric noise levels
+$\sigma_1>\dots>\sigma_L$, a network $s_\theta(x,\sigma)\approx\nabla_x\log p_\sigma(x)$ is trained with
+denoising score matching \citep{vincent2011,song2019}:
+\begin{equation}
+\mathcal L(\theta)=\mathbb E_{\sigma}\,\mathbb E_{x\sim p_{\text{data}},\,z\sim\mathcal N(0,I)}
+\Big[\tfrac12\big\|\sigma\,s_\theta(x+\sigma z,\sigma)+z\big\|_2^2\Big].
+\end{equation}
+Annealed Langevin dynamics (NCSN) runs $T$ steps at each level, from $\sigma_1$ down to $\sigma_L$:
+\begin{equation}
+x \leftarrow x + \eta_i\, s_\theta(x,\sigma_i) + \sqrt{2\eta_i}\,z,\qquad \eta_i=\epsilon\,(\sigma_i/\sigma_L)^2,
+\label{eq:langevin}
+\end{equation}
+followed by one denoising step $x\leftarrow x+\sigma_L^2 s_\theta(x,\sigma_L)$. The cost is $LT{+}1$ network calls.
+
+\subsection{Birth-death step}
+Following Lu et al.\ \citep{lu2019}, after the $T$ Langevin steps of level $i$ ($i<L$) we apply one birth-death step
+of length $\Delta t = T\eta_i$ (the Langevin time spent at that level) to the $N$ particles:
+\begin{equation}
+\beta_j = \log\frac{\rho(x_j)}{\pi(x_j)} - \frac1N\sum_{\ell}\log\frac{\rho(x_\ell)}{\pi(x_\ell)},
+\label{eq:beta}
+\end{equation}
+where $\rho$ is the density of the particles and $\pi$ the target ($p_{\sigma_i}$). Particle $j$ is removed with
+probability $1-e^{-\beta_j\Delta t}$ if $\beta_j>0$ and duplicated with probability $1-e^{\beta_j\Delta t}$ if
+$\beta_j<0$; each event is paired with the opposite event on a random particle so $N$ stays fixed.
+\note{Explain in your words why this helps: Langevin moves particles locally and needs many steps to move mass between
+modes; birth-death moves mass between modes directly. Mention $\log\rho+V$ form in Lu et al., where $V=-\log\pi$.}
+
+\begin{algorithm}[h]
+\caption{Annealed Langevin with birth-death}
+\begin{algorithmic}[1]
+\State $x_{1..N}\sim\mathcal U[0,1]^{784}$
+\For{$i=1,\dots,L$}
+  \For{$t=1,\dots,T_i$} \State Langevin step \eqref{eq:langevin} on all particles \EndFor
+  \If{$i<L$} \State estimate $\beta_j$ \eqref{eq:beta} for all particles; remove / duplicate with $\Delta t=T_i\eta_i$ \EndIf
+\EndFor
+\State $x\leftarrow x+\sigma_L^2 s_\theta(x,\sigma_L)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Work done before the prep-presentation review}
+\note{Fill in what you had at the prep review (e.g.\ literature study, toy baseline, birth-death with exact $V$ on the
+toy problem, the three $V$ estimators). Use the subsections below as material.}
+
+\paragraph{Estimating $\rho/\pi$ on the 2D toy problem.} (i) Exact $V=-\log p_\sigma$ with a Gaussian kernel density
+estimate of $\rho$ (oracle). (ii) Energy network $E_\theta(x,\sigma)$ with $s=-\nabla_x E$ and $V=E$. (iii) Energy
+network with a heat-equation consistency loss: $p_\sigma$ satisfies $\partial_\sigma p=\sigma\Delta p$, so with
+$\log p_\sigma=-E+c(\sigma)$
+\begin{equation}
+R(x,\sigma)=\frac{\partial E}{\partial\log\sigma}-\sigma^2\big(\Delta_x E-\|\nabla_x E\|^2\big)=\sigma c'(\sigma)
+\quad\Rightarrow\quad \mathcal L_{\text{heat}}=\mathbb E_\sigma\operatorname{Var}_x R(x,\sigma).
+\end{equation}
+(iv) Probability-flow ODE likelihood \citep{song2021}:
+$V_{\sigma_0}(x_0)=-\log p_{\sigma_{\max}}(x(\sigma_{\max}))+\int_{\sigma_0}^{\sigma_{\max}}\sigma\,\nabla\!\cdot s(x(\sigma),\sigma)\,d\sigma$,
+$\;dx/d\sigma=-\sigma s(x,\sigma)$.
+\note{Explain why (ii) fails at low noise (DSM only constrains $\nabla E$ where data has mass; the gap between modes is
+not determined) and why (iii) and (iv) fix it. See the methods note \texttt{estimating\_V.pdf}.}
+
+\subsection{Work done after the prep-presentation review}
+\paragraph{Why $V$ + kernel density does not carry over to images.}\mbox{}\\
+\note{In 784 dimensions $V$ of two equally good samples differs by about $\sqrt{784/2}\approx 20$ only because of the
+random norm of the noise; a kernel density from 1000 particles cannot cancel this, so $\beta$ is dominated by noise.
+Cite your cell-20 test (Table~\ref{tab:vkde}).}
+
+\paragraph{Estimator A: noise-aware classifier.} A classifier $p_\phi(k\mid x,\sigma)$ is trained on noisy training
+images. Writing the training distribution as $\pi=\sum_k\pi_k q_k$ and assuming the particles have the right shape
+within each digit but wrong digit masses, $\rho=\sum_k m_k q_k$, Bayes' rule gives for any target mix $\pi'_k$
+\begin{equation}
+\frac{\rho(x)}{\pi'(x)}=\frac{\sum_k (m_k/\pi_k)\,p_\phi(k\mid x,\sigma)}{\sum_k(\pi'_k/\pi_k)\,p_\phi(k\mid x,\sigma)},
+\end{equation}
+with the particle masses $m_k$ estimated by label-shift EM \citep{saerens2002}: iterate
+$r_{jk}\propto m_k p_\phi(k|x_j)/\pi_k$, $m_k=\frac1N\sum_j r_{jk}$.
+
+\paragraph{Estimator B: $k$ nearest neighbours in denoised space (label-free).} Noisy training images $y+\sigma_i z$
+are exact samples of $p_{\sigma_i}$. Particles and $M{=}5000$ such reference images are both mapped through the score
+model's denoiser $\phi(x)=x+\sigma^2 s_\theta(x,\sigma)$ (Tweedie), and nearest neighbours are found in denoised space,
+where images lie near the low-dimensional data manifold. This gives a \emph{proxy} for $\rho/\pi$, not the exact ratio:
+for a map $\phi$ applied to both sets, the ratio of the pushed-forward densities at $y$ equals
+$\mathbb E_{\pi}[\rho/\pi\,(x)\mid\phi(x)=y]$, i.e.\ the true ratio averaged over inputs with the same denoised image. It is
+exact only if $\phi$ is invertible (Jacobians cancel) or the ratio is constant along these sets; with a learned, approximate
+denoiser neither is guaranteed. The averaging removes variation along noise directions, which is what birth-death should
+ignore. If $a_j$ of the $k$ nearest
+neighbours of particle $j$ are particles,
+\begin{equation}
+\log\frac{\rho}{\pi}(x_j)\approx\log\frac{a_j+\frac12}{N}-\log\frac{k-a_j+\frac12}{M}.
+\end{equation}
+\note{Explain the two error sources (randomness of $k$ counts vs.\ neighbourhood width) and that the $k$ ablation shows
+robustness. Explain that estimator B also corrects the shape inside each digit, A only the digit masses.}
+
+\section{Data set Details} \label{sec:data}
+\note{MNIST: source (torchvision / LeCun et al.), 60k/10k grayscale $28\times28$ images, 10 classes, pixels scaled
+to $[0,1]$. Imbalanced version: keep 25\% of digits 0--4 (seed 0) $\Rightarrow$ 37{,}050 training images, digits 0--4
+4\% each, 5--9 16\% each (rare group 20\%, as in the toy problem); test set built the same way (seed 1) is the FID
+reference. Normal MNIST: all images. Why imbalance: rare modes make mode-proportion errors measurable; real data is
+often long-tailed. Toy data: $0.2\,\mathcal N((-5,-5),I)+0.8\,\mathcal N((5,5),I)$.}
+
+\section{Experiments} \label{sec:exp}
+\note{Hardware: Kaggle Tesla T4 16\,GB. Code: GitHub link HERE. Training settings (Table~\ref{tab:settings}).
+Metrics: TV (digit mix vs target, from hard predictions of the evaluation classifier), classifier-feature FID (FID formula on 128-d evaluation-classifier features; not comparable to Inception FID; reference = imbalanced test set), confidence, near-duplicates
+($L_2<1$), score-network calls, wall-clock time. 1000 samples per run, 3 seeds (mean $\pm$ std). All samplers use the
+same trained networks and the same initial noise. Include ALL experiments, also negative ones (step schedule,
+$V$+KDE, $T{=}5$).}
+
+\begin{table}[h]\centering\small
+\caption{Training and sampling settings.}\label{tab:settings}
+\resizebox{\linewidth}{!}{\begin{tabular}{lll}\toprule
+Component & Architecture & Training \\\midrule
+Score network & U-Net 32/64/128 ch., GroupNorm, SiLU, $\sigma$ embedding, output$/\sigma$, 1.0M params & DSM, 40k iters, batch 128, Adam $2\!\times\!10^{-4}$, EMA 0.999 \\
+Noise-aware classifier & 3 conv layers with FiLM($\sigma$) & CE, 6k iters, batch 256, Adam $10^{-3}$, cosine \\
+Evaluation classifier & 4 conv + FC 128 (clean, balanced MNIST) & CE, 4 epochs, augmentation; 98.76\% test acc. \\
+Noise levels & $L{=}10$, geometric, $\sigma_1{=}14.9$ (max pairwise distance), $\sigma_L{=}0.01$ & -- \\
+Sampler & $\epsilon=2\!\times\!10^{-5}$, $T\in\{100,50,20,10,5\}$, final denoising step & 1000 samples, seeds 0--2 \\
+\bottomrule\end{tabular}}
+\end{table}
+
+\begin{table}[h]\centering\small
+\caption{Noise-aware classifier on the imbalanced test set: accuracy and calibration error (ECE) at each noise level.
+At the three highest levels the rare digits 0--4 have 0\% accuracy (the classifier falls back to the training mix).}\label{tab:noisyclf}
+\begin{tabular}{lcccccccccc}\toprule
+$\sigma$ & 14.9 & 6.62 & 2.94 & 1.31 & 0.579 & 0.257 & 0.114 & 0.051 & 0.023 & 0.010 \\\midrule
+accuracy & 0.177 & 0.191 & 0.248 & 0.496 & 0.909 & 0.976 & 0.984 & 0.984 & 0.984 & 0.985 \\
+ECE & 0.006 & 0.007 & 0.017 & 0.011 & 0.008 & 0.008 & 0.008 & 0.009 & 0.009 & 0.007 \\\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}\label{sec:results}
+
+\subsection{2D toy problem}
+\begin{table}[h]\centering\small
+\caption{Toy problem, split error (target 20/80), mean of 3 seeds; SW distance in brackets.}\label{tab:toy}
+\begin{tabular}{lcccc}\toprule
+$T$ & Baseline & BD, exact $V$ & BD, classifier & BD, kNN denoised \\\midrule
+100 & 3.2\% (0.39) & 0.6\% (0.20) & 2.5\% (0.33) & 1.2\% (0.10) \\
+20 & 2.9\% (0.33) & 0.9\% (0.21) & 0.6\% (0.24) & 0.8\% (0.13) \\
+10 & 8.3\% (0.93) & 0.7\% (0.23) & 0.2\% (0.54) & 1.8\% (0.27) \\
+5 & 15.2\% (2.58) & 0.7\% (0.32) & 0.5\% (1.55) & 2.9\% (0.48) \\\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]\centering\small
+\caption{Toy problem, mode gap $V(\mu_L)-V(\mu_R)$ (true 1.39) for two training runs, and GPU benchmark (T4, $N{=}1000$).}\label{tab:gap}
+\begin{tabular}{lccc|lccc}\toprule
+$\sigma$ & energy $E$ & $E$+heat & ODE & Setup ($T$) & time & speed-up & split err \\\midrule
+6.16 & 1.17 / 1.05 & 1.10 / 1.32 & 1.27 / 1.33 & baseline (100) & 0.338 s & 1.0$\times$ & 4.7\% \\
+1.90 & 1.65 / 1.05 & 1.32 / 1.59 & 1.52 / 1.65 & BD exact $V$ (5) & 0.035 s & 9.8$\times$ & 1.4\% \\
+0.58 & 2.07 / 1.56 & 1.28 / 1.53 & 1.57 / 1.75 & BD $E$+heat (5) & 0.073 s & 4.6$\times$ & 0.2\% \\
+0.10 & 4.63 / 3.50 & 1.27 / 1.55 & 1.59 / 1.75 & BD ODE (5) & 0.177 s & 1.9$\times$ & 1.0\% \\\bottomrule
+\end{tabular}
+\end{table}
+\begin{center}\fig{figures/toy_bd_exactV_vs_baseline.png}{0.95}\\ \small Figure: toy samples, baseline (top) vs birth-death with exact $V$ (bottom).\end{center}
+\note{Interpret: fewer steps break the split; birth-death fixes it; plain energy fails at low noise, heat loss and ODE fix
+it; results vary between training runs (state this).}
+
+\subsection{MNIST (imbalanced)}
+\begin{table}[h]\centering\small
+\caption{Imbalanced MNIST, 1000 samples, mean $\pm$ std over 3 seeds. FID = classifier-feature FID. Real-data reference: 1000 held-out real training images vs the test-set reference, TV 0.055, FID 21.40 (two disjoint real test subsets: FID 20.24). Target rare share 0.206. Score calls include the 9 extra denoising calls of kNN; the classifier estimator adds 9 classifier calls (not score calls). The baseline $T{=}100$ time has std 5.7\,s (first run); all other runtime std are below 1.5\,s.}\label{tab:main}
+\resizebox{\linewidth}{!}{\begin{tabular}{llrrrrccc}\toprule
+Method & $T$ & score calls & time (s) & vs base $T{=}100$ & vs base same $T$ & TV & FID & near-dup \\\midrule
+baseline & 100 & 1001 & 99.7 & 1.0$\times$ & 1.00$\times$ & $0.095\pm0.011$ & $49.7\pm5.3$ & 0.000 \\
+BD classifier & 100 & 1001 & 106.3 & 0.9$\times$ & 0.94$\times$ & $0.088\pm0.009$ & $51.7\pm11.2$ & 0.003 \\
+BD kNN & 100 & 1010 & 108.6 & 0.9$\times$ & 0.92$\times$ & $0.050\pm0.003$ & $30.1\pm3.6$ & 0.006 \\\midrule
+baseline & 50 & 501 & 53.7 & 1.9$\times$ & 1.00$\times$ & $0.109\pm0.016$ & $68.3\pm11.0$ & 0.000 \\
+BD classifier & 50 & 501 & 53.7 & 1.9$\times$ & 1.00$\times$ & $0.068\pm0.006$ & $57.4\pm2.6$ & 0.001 \\
+BD kNN & 50 & 510 & 54.5 & 1.8$\times$ & 0.98$\times$ & $0.062\pm0.015$ & $45.6\pm7.0$ & 0.003 \\\midrule
+baseline & 20 & 201 & 21.6 & 4.6$\times$ & 1.00$\times$ & $0.219\pm0.003$ & $202\pm16$ & 0.000 \\
+BD classifier & 20 & 201 & 21.6 & 4.6$\times$ & 1.00$\times$ & $0.116\pm0.013$ & $159\pm6$ & 0.001 \\
+BD kNN & 20 & 210 & 22.5 & 4.4$\times$ & 0.96$\times$ & $0.091\pm0.009$ & $117\pm8$ & 0.005 \\\midrule
+baseline & 10 & 101 & 10.9 & 9.2$\times$ & 1.00$\times$ & $0.333\pm0.018$ & $473\pm28$ & 0.000 \\
+BD classifier & 10 & 101 & 10.9 & 9.1$\times$ & 0.99$\times$ & $0.227\pm0.013$ & $419\pm6$ & 0.002 \\
+BD kNN & 10 & 110 & 11.9 & 8.4$\times$ & 0.92$\times$ & $0.243\pm0.027$ & $388\pm20$ & 0.004 \\\midrule
+baseline & 5 & 51 & 5.5 & 18.2$\times$ & 1.00$\times$ & $0.734\pm0.002$ & $1793\pm4$ & 0.000 \\
+BD classifier & 5 & 51 & 5.6 & 17.9$\times$ & 0.98$\times$ & $0.732\pm0.003$ & $1762\pm6$ & 0.001 \\
+BD kNN & 5 & 60 & 6.5 & 15.4$\times$ & 0.85$\times$ & $0.729\pm0.003$ & $1784\pm9$ & 0.002 \\\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{center}
+\fig{figures/samples_all.png}{0.98}\\ \small Figure: samples (baseline $T{=}100$, baseline $T{=}10$, BD classifier $T{=}10$, BD kNN $T{=}10$).\\[2mm]
+\fig{figures/quality_vs_calls_all.png}{0.8}\\ \small Figure: TV and FID vs score-network calls.\\[2mm]
+\fig{figures/digit_proportions.png}{0.7}\quad \\ \small Figure: digit proportions vs target.\\[2mm]
+\fig{figures/bd_per_level.png}{0.7}\\ \small Figure: estimated rare share and birth/death events per noise level.
+\end{center}
+\note{Interpret honestly: at $T{=}50$ (half the steps) both BD versions have a better digit mix than baseline $T{=}100$
+(TV 0.062 / 0.068 vs 0.095), and kNN also has a slightly lower FID (45.6 vs 49.7, within one std); at $T{=}20$ BD
+roughly halves TV (0.091 / 0.116 vs 0.219) and cuts FID from 202 to 117 (kNN); at $T{=}100$ kNN improves FID from 49.7
+to 30.1 at equal cost; $T{=}10$ still clearly better than baseline but far from $T{=}100$; $T{=}5$ collapses for all
+methods (birth-death can only select among the samples Langevin produces). TV and FID measure different things and
+neither proves the full distribution is preserved. Near-duplicates stay $\le0.6\%$. Overhead: classifier about
+$+0.1$\,s, kNN about $+1$\,s per run of 1000 samples (the $+7$\,s at $T{=}100$ is timing noise of the first baseline run).}
+
+\subsection{Ablations}
+\begin{table}[h]\centering\small
+\caption{Left: step schedule at a fixed budget of 100 Langevin steps, FID / TV (mean of 2 seeds). Right: number of
+neighbours $k$ for kNN birth-death at $T{=}20$ (baseline: TV 0.219, FID 202).}\label{tab:abl}
+\begin{tabular}{lccc}\toprule
+Schedule & baseline & BD clf & BD kNN \\\midrule
+uniform (10 each) & 469 / 0.323 & 421 / 0.230 & 384 / 0.237 \\
+fewer at high noise & 724 / 0.405 & 660 / 0.362 & 656 / 0.392 \\
+more at high noise & 466 / 0.292 & 483 / 0.226 & 436 / 0.214 \\\bottomrule
+\end{tabular}\quad
+\begin{tabular}{lccc}\toprule
+$k$ & TV & FID & near-dup \\\midrule
+5 & 0.124 & 139 & 0.003 \\ 10 & 0.129 & 140 & 0.012 \\ 20 & 0.086 & 117 & 0.007 \\
+50 & 0.101 & 121 & 0.007 \\ 100 & 0.136 & 142 & 0.005 \\\bottomrule
+\end{tabular}
+\end{table}
+\note{Step schedule: cutting high-noise steps is worst -- the digit mix is decided at high noise and the classifier is
+blind there (Table~\ref{tab:noisyclf}). More steps at high noise helps the baseline and kNN slightly. $k$: every value
+beats the baseline; $k{=}20$--50 is best.}
+
+\begin{table}[h]\centering\small
+\caption{Birth-death rate multiplier (mean of 2 seeds), TV / FID. Near-duplicate share in brackets when above 1\%.}\label{tab:rate}
+\begin{tabular}{llccc}\toprule
+Estimator & $T$ & rate 1 & rate 3 & rate 10 \\\midrule
+classifier & 20 & 0.109 / 156 & 0.095 / 160 & 0.142 / 213 (1.4\%) \\
+classifier & 10 & 0.230 / 421 & 0.211 / 418 & 0.174 / 411 \\
+kNN & 20 & 0.086 / 117 & 0.093 / 118 & 0.078 / 107 (3.5\%) \\
+kNN & 10 & 0.237 / 384 & 0.199 / 371 & 0.201 / 348 (2.6\%) \\\bottomrule
+\end{tabular}
+\end{table}
+\note{Rate: a stronger rate helps a little at $T{=}10$ but creates more duplicates; at $T{=}20$ rate 10 hurts the
+classifier version. Rate 1 (the Lu et al.\ value) is a safe default.}
+
+\begin{table}[h]\centering\small
+\caption{Original Lu et al.\ rule on MNIST: $V$ from the probability-flow ODE (4 Hutchinson probes) + kernel density.
+Test A: spread of $\beta$ and share of particles killed or duplicated in one birth-death step, compared with kNN.
+Test B, full sampler at $T{=}20$: seed 0 TV 0.158, FID 177, near-dup 44.2\%; seed 1 TV 0.115, FID 136, near-dup 47.3\%; 40\,s per run (kNN: TV 0.091, FID 117, near-dup 0.5\%, 22.5\,s).}\label{tab:vkde}
+\resizebox{\linewidth}{!}{\begin{tabular}{lcccc}\toprule
+$\sigma$ & std($\beta$) V+KDE & acted on & std($\beta$) kNN & acted on \\\midrule
+3.00 & 20.2 & 95.9\% & 0.62 & 34.1\% \\
+1.33 & 21.6 & 96.3\% & 0.72 & 37.5\% \\
+0.588 & 21.0 & 96.7\% & 0.73 & 37.9\% \\
+0.260 & 25.2 & 97.2\% & 0.72 & 37.4\% \\
+0.115 & 31.0 & 98.0\% & 0.72 & 37.6\% \\\bottomrule
+\end{tabular}}
+\end{table}
+\note{V+KDE: $\beta$ spreads by about 20 $\approx\sqrt{d/2}$ (expected fluctuation of $-\log p$ in $d{=}784$), so almost
+every particle is killed or duplicated at every level and about half the samples become copies; 2$\times$ slower than
+kNN. Negative result: the original rule does not work directly on images.}
+
+\subsection{Normal (balanced) MNIST}
+\note{Table with the same columns as Table~\ref{tab:main} from the balanced run (cells 12 and 16). Interpret whether
+birth-death still helps / does not create an imbalance.}
+
+\subsection{Interface}
+\note{Describe \texttt{app.py} (Gradio): inputs (model, estimator, $T$, number of samples, rate, $k$, target digit mix,
+seed), outputs (two sample grids from the same initial noise, digit-proportion plot, metrics table). How to run
+(\texttt{python app.py --model NAME:DIR:SIGMA\_MAX:KEEP --share}). Add a screenshot.}
+
+\section{Plan for Novelty Assessment} \label{sec:Plan for Novelty Assessment}
+\note{Ideas: (1) potential-based birth-death on images with $V$ from the ODE / heat-loss energy model computed in a
+learned low-dimensional feature space; (2) heat-equation-regularised energy network on MNIST; (3) birth-death rate that
+adapts to $T$ (stronger at small $T$) and to the classifier's confidence; (4) combine birth-death with faster samplers
+(DDIM / probability-flow ODE); (5) CIFAR-10; (6) learned metric for the kNN estimator.}
+
+\section{Conclusion} \label{sec:conclusion}
+\note{Summary: problem, methods (oracle on toy, three $V$ estimators, classifier and kNN estimators on MNIST), main
+results with numbers, limitations (labels for the classifier estimator; FID gap at reduced steps; failure at $T{=}5$;
+$V$ estimation in high dimension; variation between training runs), future work.}
+
+\begin{thebibliography}{99}\small
+\bibitem{song2019} Yang Song and Stefano Ermon. Generative modeling by estimating gradients of the data distribution, Advances in Neural Information Processing Systems (NeurIPS), 2019. \url{https://arxiv.org/abs/1907.05600}
+\bibitem{song2020} Yang Song and Stefano Ermon. Improved techniques for training score-based generative models, Advances in Neural Information Processing Systems (NeurIPS), 2020. \url{https://arxiv.org/abs/2006.09011}
+\bibitem{song2021} Yang Song, Jascha Sohl-Dickstein, Diederik P. Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole. Score-based generative modeling through stochastic differential equations, International Conference on Learning Representations (ICLR), 2021. \url{https://arxiv.org/abs/2011.13456}
+\bibitem{ho2020} Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models, Advances in Neural Information Processing Systems (NeurIPS), 2020. \url{https://arxiv.org/abs/2006.11239}
+\bibitem{ddim} Jiaming Song, Chenlin Meng, and Stefano Ermon. Denoising diffusion implicit models, International Conference on Learning Representations (ICLR), 2021. \url{https://arxiv.org/abs/2010.02502}
+\bibitem{lu2019} Yulong Lu, Jianfeng Lu, and James Nolen. Accelerating Langevin sampling with birth-death, arXiv preprint, 2019. \url{https://arxiv.org/abs/1905.09863}
+\bibitem{vincent2011} Pascal Vincent. A connection between score matching and denoising autoencoders, Neural Computation 23(7), 2011. \url{https://doi.org/10.1162/NECO_a_00142}
+\bibitem{saerens2002} Marco Saerens, Patrice Latinne, and Christine Decaestecker. Adjusting the outputs of a classifier to new a priori probabilities: a simple procedure, Neural Computation 14(1), 2002. \url{https://doi.org/10.1162/089976602753284446}
+\bibitem{ncsncode} Yang Song and Stefano Ermon. \url{https://github.com/ermongroup/ncsn}, 2019. Accessed on: 12th October, 2026.
+\bibitem{ncsnv2code} Yang Song and Stefano Ermon. \url{https://github.com/ermongroup/ncsnv2}, 2020. Accessed on: 25th October, 2026.
+\end{thebibliography}
+\end{document}

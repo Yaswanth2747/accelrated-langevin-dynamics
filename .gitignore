@@ -1,0 +1,11 @@
+data/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+flagged/
+.gradio/
+report/*.aux
+report/*.log
+report/*.fls
+report/*.fdb_latexmk
+report/*.out
