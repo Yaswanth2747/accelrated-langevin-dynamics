@@ -44,3 +44,9 @@ for T in [100, 20, 10, 5]:
             x = run2(T, mode, seed); l, _ = mode_fractions(x); e.append(abs(l - 0.2)); w.append(sliced_wasserstein(x, real))
         out.append(f"{sum(e)/3:5.1%} ({sum(w)/3:.2f})")
     print(f"{T:4d}  " + "  ".join(f"{o:>13s}" for o in out))
+
+e, w = [], []
+for seed in [1, 2, 3]:
+    x = run2(50, "knn", seed); l, _ = mode_fractions(x)
+    e.append(abs(l - 0.2)); w.append(sliced_wasserstein(x, real))
+print(f"T=50 BD kNN: split err {sum(e)/3:.1%}  SW {sum(w)/3:.2f}")
