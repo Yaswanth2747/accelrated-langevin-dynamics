@@ -5,7 +5,7 @@ T Langevin steps per level). With few steps, the samples come out in the wrong p
 digit types over-produced, others under-produced) and quality drops.
 We run many samples (particles) in parallel and add a **birth-death step** (Lu, Lu & Nolen, 2019) after every
 noise level: particles in over-populated regions are removed and particles in under-populated regions are
-duplicated. The step needs the density ratio between the particles and the target; we compare several ways
+duplicated. The step needs the density ratio between the particles and the target. Here we compare several ways
 to estimate it.
 
 | Estimator of log(rho / target) | Where | Needs |
