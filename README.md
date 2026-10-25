@@ -38,7 +38,7 @@ Hardware used: Kaggle, NVIDIA Tesla T4 (16 GB), PyTorch 2.x. MNIST is downloaded
 
 ## Data
 
-MNIST (LeCun et al.; via `torchvision.datasets.MNIST`), images scaled to [0, 1], no augmentation for the score model.
+MNIST (LeCun et al.; via `torchvision.datasets.MNIST`), images are scaled to [0, 1], no augmentation is done for the score model.
 * **Imbalanced MNIST**: keep 25% of the images of digits 0-4 (seed 0) -> 37,050 training images,
   digits 0-4 are 4% each and digits 5-9 16% each (rare group 20%, like the 20/80 toy problem).
   Test set built the same way (seed 1), used as the FID reference.
@@ -49,11 +49,15 @@ MNIST (LeCun et al.; via `torchvision.datasets.MNIST`), images scaled to [0, 1],
 **Toy (CPU is enough):** run `toy/toy_experiments.ipynb` top to bottom (results in `toy/README.md`).
 
 **MNIST (GPU):** run `notebooks/mnist_cells/01 ... 05` as consecutive cells of one Kaggle notebook
-(GPU on, Internet on). Settings: score network trained 40,000 iterations, batch 128, Adam lr 2e-4, EMA 0.999,
-denoising score matching with weight sigma^2; noise-aware classifier 6,000 iterations, batch 256, Adam 1e-3,
-cosine schedule; evaluation classifier 4 epochs on clean balanced MNIST (98.76% test accuracy).
-Sampler: eta = 2e-5 * (sigma / sigma_L)^2 (NCSN), final Tweedie denoising step, 1000 samples per run, seeds 0-2.
-
+(GPU on, Internet on). 
+Settings: score network trained 40,000 iterations, batch 128, Adam lr 2e-4, EMA 0.999,
+denoising score matching with weight sigma^2 and a noise aware classifier is trained with 6,000 iterations, batch 256, Adam 1e-3,
+cosine schedule. The evaluation classifier is trained with 4 epochs on clean balanced MNIST and achieves a 98.76% test accuracy
+Sampler: The algorithm used to generate new MNIST digits from random noise.
+\(\eta = 2\times10^{-5}(\sigma/\sigma_L)^2\) (NCSN): We use the NCSN sampling method, with a step size that depends on the current noise level \(\sigma\). The step size becomes smaller as the noise level decreases as given in the paper.
+Final Tweedie denoising step: After sampling, apply one final correction using the score model to get an estimate of a cleaner image.
+1000 particles per run: We generate 1000 images in each run. Here, particles simply means candidate samples or generated images.
+Seeds 0–2: We repeat the experiment three times using random seeds 0, 1, and 2, generating 3000 images in total.
 ## Interface
 
 ```
@@ -71,9 +75,10 @@ calls, digit-mix error (TV), FID, confidence and near-duplicates.
 
 * **TV**: total-variation distance between the digit mix of the samples and the target (0 = perfect).
 * **FID (classifier features)**: the FID formula applied to 128-d features of the evaluation classifier (samples vs real test images). Not comparable to standard Inception-based FID values.
-* **Confidence**: mean max-probability of the evaluation classifier. **Near-duplicates**: share of samples with
-  another sample closer than 1.0 (L2) - checks that birth-death does not destroy diversity.
-* Cost: score-network calls per sample and wall-clock time (T4).
+* **Confidence**: mean max probability of the evaluation classifier.
+* **Near-duplicates**: share of samples with
+  another sample closer than 1.0 (L2) - checks whether birth death process destroys diversity or not.
+* Cost: score-network calls per sample and wall-clock time were done on T4.
 
 ## Main MNIST result (imbalanced, 1000 samples, mean of 3 seeds; held-out real data: TV 0.055, FID 21.4)
 
